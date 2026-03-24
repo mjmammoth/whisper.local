@@ -71,6 +71,61 @@ def test_build_parser_start_defaults() -> None:
     assert args.foreground is False
 
 
+def test_build_parser_accepts_plain_after_command() -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(["start", "--plain"])
+    assert args.command == "start"
+    assert args.plain is True
+
+
+def test_build_parser_preserves_plain_before_command() -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(["--plain", "start"])
+    assert args.command == "start"
+    assert args.plain is True
+
+
+def test_build_parser_accepts_plain_after_nested_subcommand() -> None:
+    parser = cli.build_parser()
+    args = parser.parse_args(["models", "list", "--plain"])
+    assert args.command == "models"
+    assert args.models_command == "list"
+    assert args.plain is True
+
+
+def test_build_parser_subparsers_use_custom_formatter() -> None:
+    parser = cli.build_parser()
+    command_subparsers = next(
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    start_parser = command_subparsers.choices["start"]
+    assert start_parser.formatter_class is parser.formatter_class
+
+    models_parser = command_subparsers.choices["models"]
+    model_subparsers = next(
+        action for action in models_parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    list_parser = model_subparsers.choices["list"]
+    assert list_parser.formatter_class is parser.formatter_class
+
+
+def test_build_parser_help_omits_subparser_metavar_row() -> None:
+    parser = cli.build_parser()
+    help_text = parser.format_help()
+    assert "<command> ..." in help_text
+    assert "\ncommands:\n" in help_text
+    assert "\ncommands:\n  <command>\n" not in help_text
+
+
+def test_build_parser_help_omits_subparser_metavar_row_with_rich_formatter() -> None:
+    rich_argparse = pytest.importorskip("rich_argparse")
+    parser = cli.build_parser(formatter_class=rich_argparse.RichHelpFormatter)
+    help_text = parser.format_help()
+    assert "<command> ..." in help_text
+    assert "\nCommands:\n" in help_text
+    assert "\n  <command>\n" not in help_text
+
+
 def test_build_parser_rejects_removed_service_command() -> None:
     parser = cli.build_parser()
     with pytest.raises(SystemExit) as exc_info:
@@ -231,7 +286,7 @@ def test_run_tui_attach_exits_when_service_start_fails(mock_ensure_service: Mock
 
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
-    assert "failed to start service" in captured.out
+    assert "failed to start service" in captured.err
     mock_ensure_service.assert_called_once()
 
 
@@ -250,15 +305,11 @@ def test_main_no_command_prints_help(
     assert "usage:" in captured.out
 
 
-@patch("murmur.cli._run_tui_attach")
-def test_main_run_command_uses_tui_attach(mock_attach: Mock, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+def test_main_rejects_removed_run_command(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["cli", "run", "--host", "127.0.0.1", "--port", "9000"])
-
-    cli.main()
-
-    mock_attach.assert_called_once_with("127.0.0.1", 9000, status_indicator=True)
-    captured = capsys.readouterr()
-    assert "deprecated" in captured.err.lower()
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main()
+    assert exc_info.value.code == 2
 
 
 @patch("murmur.cli._run_bridge")
@@ -319,7 +370,16 @@ def test_main_status_command(mock_service_status: Mock, monkeypatch: pytest.Monk
 
     cli.main()
 
-    mock_service_status.assert_called_once()
+    mock_service_status.assert_called_once_with(diagnose=False)
+
+
+@patch("murmur.cli._service_status")
+def test_main_status_command_with_diagnose(mock_service_status: Mock, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["cli", "status", "--diagnose"])
+
+    cli.main()
+
+    mock_service_status.assert_called_once_with(diagnose=True)
 
 
 @patch("murmur.cli._trigger")
@@ -442,7 +502,7 @@ def test_trigger_timeout_exits_non_zero(
     assert exc_info.value.code == 2
     mock_ensure_service.assert_called_once_with("localhost", 7878, status_indicator=True)
     captured = capsys.readouterr()
-    assert "timed out" in captured.out
+    assert "timed out" in captured.err
 
 
 @patch("murmur.cli._ensure_service_running")
@@ -475,7 +535,7 @@ def test_trigger_error_exits_non_zero(
     assert exc_info.value.code == 1
     mock_ensure_service.assert_called_once_with("localhost", 7878, status_indicator=True)
     captured = capsys.readouterr()
-    assert "trigger command failed" in captured.out
+    assert "trigger command failed" in captured.err
 
 
 @patch("murmur.cli._upgrade")
@@ -629,7 +689,7 @@ def test_uninstall_error_exits_non_zero(mock_run_uninstall: Mock, capsys) -> Non
 
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
-    assert "Error: failed" in captured.out
+    assert "Error: failed" in captured.err
 
 
 @patch("murmur.uninstall.run_uninstall")
@@ -690,7 +750,7 @@ def test_upgrade_error_exits_non_zero(mock_run_upgrade: Mock, capsys) -> None:
 
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
-    assert "network error" in captured.out
+    assert "network error" in captured.err
 
 
 @patch("murmur.model_manager.list_installed_models")
@@ -860,7 +920,7 @@ def test_run_tui_attach_handles_missing_tui_binary(
 
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
-    assert "tui binary not found" in captured.out
+    assert "tui binary not found" in captured.err
     mock_run_tui.assert_called_once_with("localhost", 7878)
     mock_restore.assert_called_once()
 
@@ -965,6 +1025,16 @@ def test_service_status_prints_running_with_indicator(
         "message": "Ready",
         "config": {
             "first_run_setup_required": False,
+            "hotkey_diagnostics": {
+                "backend": "macos_event_tap",
+                "started": True,
+                "blocked": False,
+                "thread_alive": True,
+                "press_count": 3,
+                "release_count": 3,
+                "tap_disable_count": 1,
+                "tap_reenable_count": 1,
+            },
             "startup": {
                 "phase": "ready",
                 "onboarding_close_ready": True,
@@ -979,6 +1049,7 @@ def test_service_status_prints_running_with_indicator(
     captured = capsys.readouterr()
     assert "running pid=55 host=127.0.0.1 port=8787 indicator_pid=88" in captured.out
     assert 'app_status=ready message="Ready"' in captured.out
+    assert "hotkey backend=macos_event_tap started=true blocked=false thread_alive=true" in captured.out
     assert "app_ready=true" in captured.out
     mock_runtime_snapshot.assert_called_once_with(
         "127.0.0.1",
@@ -1102,6 +1173,36 @@ def test_service_status_prints_stale_status(mock_service_manager: Mock, capsys) 
 
     captured = capsys.readouterr()
     assert "stale (cleaned) previous_pid=10 host=localhost port=7878" in captured.out
+
+
+@patch("murmur.cli.ServiceManager")
+def test_service_status_diagnose_prints_read_only_stale_snapshot(
+    mock_service_manager: Mock,
+    capsys,
+) -> None:
+    manager = mock_service_manager.return_value
+    manager.status.return_value = Mock(
+        running=False,
+        stale=True,
+        pid=10,
+        host="localhost",
+        port=7878,
+        status_indicator_pid=None,
+        pid_alive=True,
+        reachable=False,
+        stale_reason="port_unreachable",
+    )
+
+    cli._service_status(diagnose=True)
+
+    manager.status.assert_called_once_with(
+        cleanup_stale=False,
+        auto_recover_unreachable=False,
+        status_indicator=True,
+    )
+    captured = capsys.readouterr()
+    assert "stale (diagnose) pid=10 host=localhost port=7878 reason=port_unreachable" in captured.out
+    assert "diagnose pid_alive=true reachable=false cleanup=false auto_recover=false" in captured.out
 
 
 @patch("murmur.cli.ServiceManager")
@@ -1388,7 +1489,7 @@ def test_trigger_exits_when_service_start_fails(mock_ensure_service: Mock, capsy
 
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
-    assert "failed to start service" in captured.out
+    assert "failed to start service" in captured.err
     mock_ensure_service.assert_called_once_with("localhost", 7878, status_indicator=True)
 
 

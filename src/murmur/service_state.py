@@ -88,3 +88,5 @@ class ServiceStatus:
     stale: bool
     reachable: bool
     state_path: Path
+    pid_alive: bool = False
+    stale_reason: str | None = None

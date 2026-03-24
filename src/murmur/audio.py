@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import threading
 from typing import Any, Iterable
 
 import numpy as np
@@ -9,6 +10,7 @@ import sounddevice as sd
 
 
 logger = logging.getLogger(__name__)
+DEFAULT_STOP_TIMEOUT_SECONDS = 0.75
 
 
 @dataclass(frozen=True)
@@ -136,30 +138,77 @@ class AudioRecorder:
         self.device = device
         self._stream: sd.InputStream | None = None
         self._frames: list[np.ndarray] = []
+        self._state_lock = threading.Lock()
 
     def start(self) -> None:
-        if self._stream is not None:
-            return
-        self._frames = []
-        self._stream = sd.InputStream(
-            samplerate=self.sample_rate,
-            channels=self.channels,
-            dtype="float32",
-            device=self.device,
-            callback=self._on_audio,
-        )
-        self._stream.start()
+        with self._state_lock:
+            if self._stream is not None:
+                return
+            self._frames = []
+            stream = sd.InputStream(
+                samplerate=self.sample_rate,
+                channels=self.channels,
+                dtype="float32",
+                device=self.device,
+                callback=self._on_audio,
+            )
+            self._stream = stream
+        try:
+            stream.start()
+        except Exception:
+            with self._state_lock:
+                if self._stream is stream:
+                    self._stream = None
+            raise
 
-    def stop(self) -> np.ndarray:
-        if self._stream is None:
-            return np.empty(0, dtype=np.float32)
-        self._stream.stop()
-        self._stream.close()
-        self._stream = None
-        return _flatten_frames(self._frames, self.channels)
+    def stop(self, timeout_seconds: float = DEFAULT_STOP_TIMEOUT_SECONDS) -> np.ndarray:
+        with self._state_lock:
+            stream = self._stream
+            if stream is None:
+                return np.empty(0, dtype=np.float32)
+            frames = self._frames
+            self._stream = None
+            self._frames = []
+
+        stream_error: Exception | None = None
+
+        def _stop_stream() -> None:
+            nonlocal stream_error
+            try:
+                stream.stop()
+            except Exception as exc:
+                stream_error = exc
+            finally:
+                try:
+                    stream.close()
+                except Exception as exc:
+                    if stream_error is None:
+                        stream_error = exc
+
+        stopper = threading.Thread(
+            target=_stop_stream,
+            daemon=True,
+            name="murmur-audio-stop",
+        )
+        stopper.start()
+        if timeout_seconds <= 0:
+            stopper.join()
+        else:
+            stopper.join(timeout_seconds)
+
+        if stopper.is_alive():
+            logger.error(
+                "Timed out stopping audio stream; recorder state reset timeout_seconds=%s",
+                timeout_seconds,
+            )
+        elif stream_error is not None:
+            raise stream_error
+
+        return _flatten_frames(frames, self.channels)
 
     def is_recording(self) -> bool:
-        return self._stream is not None
+        with self._state_lock:
+            return self._stream is not None
 
     def _on_audio(
         self,
@@ -168,9 +217,14 @@ class AudioRecorder:
         time: sd.CallbackFlags,
         status: sd.CallbackFlags,
     ) -> None:
+        del frames, time
         if status:
             logger.warning("Audio callback status: %s", status)
-        self._frames.append(indata.copy())
+        with self._state_lock:
+            if self._stream is None:
+                return
+            self._frames.append(indata.copy())
+
 
 
 def _flatten_frames(frames: Iterable[np.ndarray], channels: int) -> np.ndarray:

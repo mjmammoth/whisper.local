@@ -936,7 +936,25 @@ class BridgeServer:
         """Stop recording and process audio."""
         if not self._recording or not self.recorder:
             return
-        audio = self.recorder.stop()
+        try:
+            audio = await asyncio.get_running_loop().run_in_executor(
+                None,
+                self.recorder.stop,
+            )
+        except Exception as exc:
+            logger.exception("Failed to stop audio recording")
+            self._recording = False
+            self._invalidate_audio_inputs()
+            await self._broadcast(
+                {
+                    "type": "toast",
+                    "message": f"Failed to stop recording: {exc}",
+                    "level": "error",
+                }
+            )
+            await self._set_status("error", f"Recording stop failed: {exc}")
+            await self._broadcast_config()
+            return
         self._recording = False
 
         job_transcriber = self.transcriber
