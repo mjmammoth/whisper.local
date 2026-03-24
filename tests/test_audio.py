@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import time
+
 from murmur import audio
+import numpy as np
 
 
 class _FakeDefaultDevice:
@@ -93,3 +96,58 @@ def test_scan_audio_input_devices_marks_unsupported_sample_rate(monkeypatch):
     assert result.devices[0].sample_rate_supported is False
     assert result.devices[0].sample_rate_reason == "unsupported sample rate"
     assert result.devices[1].sample_rate_supported is True
+
+
+class _FakeStream:
+    def __init__(self, *, stop_delay_seconds: float = 0.0, stop_error: Exception | None = None):
+        self.stop_delay_seconds = stop_delay_seconds
+        self.stop_error = stop_error
+        self.stop_called = 0
+        self.close_called = 0
+
+    def stop(self) -> None:
+        self.stop_called += 1
+        if self.stop_delay_seconds > 0:
+            time.sleep(self.stop_delay_seconds)
+        if self.stop_error is not None:
+            raise self.stop_error
+
+    def close(self) -> None:
+        self.close_called += 1
+
+
+def test_audio_recorder_stop_returns_empty_when_not_recording():
+    recorder = audio.AudioRecorder(sample_rate=16_000, channels=1)
+
+    result = recorder.stop()
+
+    assert result.size == 0
+
+
+def test_audio_recorder_stop_flattens_frames_and_closes_stream():
+    recorder = audio.AudioRecorder(sample_rate=16_000, channels=1)
+    stream = _FakeStream()
+    recorder._stream = stream
+    recorder._frames = [np.array([[0.5], [-0.25]], dtype=np.float32)]
+
+    result = recorder.stop(timeout_seconds=0.2)
+
+    assert np.allclose(result, np.array([0.5, -0.25], dtype=np.float32))
+    assert stream.stop_called == 1
+    assert stream.close_called == 1
+    assert recorder.is_recording() is False
+
+
+def test_audio_recorder_stop_timeout_resets_recorder_state_without_blocking():
+    recorder = audio.AudioRecorder(sample_rate=16_000, channels=1)
+    stream = _FakeStream(stop_delay_seconds=0.2)
+    recorder._stream = stream
+    recorder._frames = [np.array([[1.0]], dtype=np.float32)]
+
+    started = time.monotonic()
+    result = recorder.stop(timeout_seconds=0.01)
+    elapsed = time.monotonic() - started
+
+    assert result.size == 1
+    assert elapsed < 0.15
+    assert recorder.is_recording() is False

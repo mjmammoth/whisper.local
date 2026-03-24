@@ -600,6 +600,45 @@ def test_start_recording_blocks_when_runtime_or_model_not_ready(mock_config):
     )
 
 
+def test_stop_recording_runs_stop_off_event_loop_and_spawns_transcription(mock_config):
+    server = BridgeServer(mock_config)
+    server._recording = True
+    server.recorder = Mock()
+    server.recorder.stop.return_value = [0.1, -0.2]
+    server.transcriber = Mock()
+    server._set_status = AsyncMock()
+    server._spawn_task = Mock(side_effect=spawn_task_stub)
+    server._process_audio = AsyncMock()
+
+    asyncio.run(server._stop_recording())
+
+    server.recorder.stop.assert_called_once()
+    assert server._recording is False
+    server._set_status.assert_awaited_once_with("transcribing", "Transcribing...")
+    assert server._spawn_task.call_count == 1
+
+
+def test_stop_recording_reports_error_when_recorder_stop_fails(mock_config):
+    server = BridgeServer(mock_config)
+    server._recording = True
+    server.recorder = Mock()
+    server.recorder.stop.side_effect = RuntimeError("stop failure")
+    server._broadcast = AsyncMock()
+    server._set_status = AsyncMock()
+    server._broadcast_config = AsyncMock()
+    server._spawn_task = Mock()
+    server._invalidate_audio_inputs = Mock()
+
+    asyncio.run(server._stop_recording())
+
+    assert server._recording is False
+    server._invalidate_audio_inputs.assert_called_once()
+    server._set_status.assert_awaited_once_with("error", "Recording stop failed: stop failure")
+    server._broadcast_config.assert_awaited_once()
+    server._broadcast.assert_awaited()
+    server._spawn_task.assert_not_called()
+
+
 def test_handle_client_does_not_block_message_processing_on_transcript_history(mock_config):
     server = BridgeServer(mock_config)
     websocket = FakeClientWebSocket(messages=[json.dumps({"type": "list_models"})])
