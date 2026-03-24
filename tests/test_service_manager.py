@@ -130,6 +130,8 @@ def test_status_returns_stopped_when_state_missing(tmp_path: Path) -> None:
     assert status.running is False
     assert status.pid is None
     assert status.stale is False
+    assert status.pid_alive is False
+    assert status.stale_reason is None
 
 
 def test_status_marks_and_cleans_stale_state(tmp_path: Path) -> None:
@@ -145,6 +147,8 @@ def test_status_marks_and_cleans_stale_state(tmp_path: Path) -> None:
     assert status.running is False
     assert status.stale is True
     assert status.pid == 99999
+    assert status.pid_alive is False
+    assert status.stale_reason == "pid_not_alive"
     assert state_path.exists() is False
 
 
@@ -173,9 +177,99 @@ def test_status_marks_alive_but_unreachable_state_stale(tmp_path: Path) -> None:
     assert status.host == "localhost"
     assert status.port == 7878
     assert status.status_indicator_pid == 3333
+    assert status.pid_alive is True
+    assert status.stale_reason == "port_unreachable"
     mock_terminate.assert_any_call(2222, is_expected_pid=ANY)
     mock_terminate.assert_any_call(3333, timeout=1.5, is_expected_pid=ANY)
     assert state_path.exists() is False
+
+
+def test_status_diagnose_mode_does_not_cleanup_unreachable_state(tmp_path: Path) -> None:
+    state_path = tmp_path / "service.json"
+    state = ServiceState.new(
+        pid=2222,
+        host="localhost",
+        port=7878,
+        status_indicator_pid=3333,
+    )
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(f"{json.dumps(state.to_dict())}\n", encoding="utf-8")
+    manager = ServiceManager(state_path=state_path)
+
+    with patch("murmur.service_manager._is_pid_alive", return_value=True), patch(
+        "murmur.service_manager._is_port_reachable",
+        return_value=False,
+    ), patch("murmur.service_manager._terminate_pid") as mock_terminate:
+        status = manager.status(cleanup_stale=False, auto_recover_unreachable=False)
+
+    assert status.running is False
+    assert status.stale is True
+    assert status.pid_alive is True
+    assert status.stale_reason == "port_unreachable"
+    mock_terminate.assert_not_called()
+    assert state_path.exists() is True
+
+
+def test_status_auto_restarts_unreachable_bridge(tmp_path: Path) -> None:
+    state_path = tmp_path / "service.json"
+    state = ServiceState.new(
+        pid=2222,
+        host="localhost",
+        port=7878,
+        status_indicator_pid=3333,
+    )
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(f"{json.dumps(state.to_dict())}\n", encoding="utf-8")
+    manager = ServiceManager(state_path=state_path)
+
+    recovered = Mock()
+    recovered.running = True
+    recovered.stale = False
+
+    with patch("murmur.service_manager._is_pid_alive", return_value=True), patch(
+        "murmur.service_manager._is_port_reachable",
+        return_value=False,
+    ), patch.object(
+        manager,
+        "start_background",
+        return_value=recovered,
+    ) as mock_start_background:
+        status = manager.status(
+            cleanup_stale=True,
+            auto_recover_unreachable=True,
+            status_indicator=True,
+        )
+
+    mock_start_background.assert_called_once_with(
+        host="localhost",
+        port=7878,
+        status_indicator=True,
+    )
+    assert status is recovered
+
+
+def test_status_returns_stale_when_cleanup_fails(tmp_path: Path) -> None:
+    state_path = tmp_path / "service.json"
+    state = ServiceState.new(pid=2222, host="localhost", port=7878, status_indicator_pid=None)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(f"{json.dumps(state.to_dict())}\n", encoding="utf-8")
+    manager = ServiceManager(state_path=state_path)
+
+    with patch("murmur.service_manager._is_pid_alive", return_value=True), patch(
+        "murmur.service_manager._is_port_reachable",
+        return_value=False,
+    ), patch.object(
+        manager,
+        "_cleanup_stale_state",
+        side_effect=PermissionError("read-only"),
+    ):
+        status = manager.status()
+
+    assert status.running is False
+    assert status.stale is True
+    assert status.reachable is False
+    assert status.pid == 2222
+    assert state_path.exists() is True
 
 
 def test_save_state_does_not_ensure_global_state_directory(tmp_path: Path) -> None:

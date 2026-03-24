@@ -370,7 +370,16 @@ def test_main_status_command(mock_service_status: Mock, monkeypatch: pytest.Monk
 
     cli.main()
 
-    mock_service_status.assert_called_once()
+    mock_service_status.assert_called_once_with(diagnose=False)
+
+
+@patch("murmur.cli._service_status")
+def test_main_status_command_with_diagnose(mock_service_status: Mock, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["cli", "status", "--diagnose"])
+
+    cli.main()
+
+    mock_service_status.assert_called_once_with(diagnose=True)
 
 
 @patch("murmur.cli._trigger")
@@ -1016,6 +1025,16 @@ def test_service_status_prints_running_with_indicator(
         "message": "Ready",
         "config": {
             "first_run_setup_required": False,
+            "hotkey_diagnostics": {
+                "backend": "macos_event_tap",
+                "started": True,
+                "blocked": False,
+                "thread_alive": True,
+                "press_count": 3,
+                "release_count": 3,
+                "tap_disable_count": 1,
+                "tap_reenable_count": 1,
+            },
             "startup": {
                 "phase": "ready",
                 "onboarding_close_ready": True,
@@ -1030,6 +1049,7 @@ def test_service_status_prints_running_with_indicator(
     captured = capsys.readouterr()
     assert "running pid=55 host=127.0.0.1 port=8787 indicator_pid=88" in captured.out
     assert 'app_status=ready message="Ready"' in captured.out
+    assert "hotkey backend=macos_event_tap started=true blocked=false thread_alive=true" in captured.out
     assert "app_ready=true" in captured.out
     mock_runtime_snapshot.assert_called_once_with(
         "127.0.0.1",
@@ -1153,6 +1173,36 @@ def test_service_status_prints_stale_status(mock_service_manager: Mock, capsys) 
 
     captured = capsys.readouterr()
     assert "stale (cleaned) previous_pid=10 host=localhost port=7878" in captured.out
+
+
+@patch("murmur.cli.ServiceManager")
+def test_service_status_diagnose_prints_read_only_stale_snapshot(
+    mock_service_manager: Mock,
+    capsys,
+) -> None:
+    manager = mock_service_manager.return_value
+    manager.status.return_value = Mock(
+        running=False,
+        stale=True,
+        pid=10,
+        host="localhost",
+        port=7878,
+        status_indicator_pid=None,
+        pid_alive=True,
+        reachable=False,
+        stale_reason="port_unreachable",
+    )
+
+    cli._service_status(diagnose=True)
+
+    manager.status.assert_called_once_with(
+        cleanup_stale=False,
+        auto_recover_unreachable=False,
+        status_indicator=True,
+    )
+    captured = capsys.readouterr()
+    assert "stale (diagnose) pid=10 host=localhost port=7878 reason=port_unreachable" in captured.out
+    assert "diagnose pid_alive=true reachable=false cleanup=false auto_recover=false" in captured.out
 
 
 @patch("murmur.cli.ServiceManager")

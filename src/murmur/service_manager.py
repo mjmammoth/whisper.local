@@ -297,6 +297,8 @@ class ServiceManager:
         running: bool,
         stale: bool,
         reachable: bool,
+        pid_alive: bool,
+        stale_reason: str | None = None,
     ) -> ServiceStatus:
         return ServiceStatus(
             running=running,
@@ -308,9 +310,17 @@ class ServiceManager:
             stale=stale,
             reachable=reachable,
             state_path=self.state_path,
+            pid_alive=pid_alive,
+            stale_reason=stale_reason,
         )
 
-    def status(self) -> ServiceStatus:
+    def status(
+        self,
+        *,
+        cleanup_stale: bool = True,
+        auto_recover_unreachable: bool = False,
+        status_indicator: bool = True,
+    ) -> ServiceStatus:
         state = self.load_state()
         if state is None:
             return ServiceStatus(
@@ -323,19 +333,67 @@ class ServiceManager:
                 stale=False,
                 reachable=False,
                 state_path=self.state_path,
+                pid_alive=False,
+                stale_reason=None,
             )
 
         pid_alive = _is_pid_alive(state.pid)
         reachable = pid_alive and _is_port_reachable(state.host, state.port)
 
         if not reachable:
-            self._cleanup_stale_state(state)
+            stale_reason = "port_unreachable" if pid_alive else "pid_not_alive"
+
+            if auto_recover_unreachable and stale_reason == "port_unreachable":
+                logger.warning(
+                    "Bridge became unreachable; attempting watchdog restart "
+                    "(pid=%s host=%s port=%s)",
+                    state.pid,
+                    state.host,
+                    state.port,
+                )
+                try:
+                    return self.start_background(
+                        host=state.host,
+                        port=state.port,
+                        status_indicator=status_indicator,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Watchdog restart failed for unreachable bridge "
+                        "(pid=%s host=%s port=%s)",
+                        state.pid,
+                        state.host,
+                        state.port,
+                        exc_info=True,
+                    )
+
+            if cleanup_stale:
+                try:
+                    self._cleanup_stale_state(state)
+                except Exception:
+                    logger.warning(
+                        "Failed to clean stale service state (pid=%s host=%s port=%s)",
+                        state.pid,
+                        state.host,
+                        state.port,
+                        exc_info=True,
+                    )
             return self._service_status_from_state(
-                state, running=False, stale=True, reachable=False,
+                state,
+                running=False,
+                stale=True,
+                reachable=False,
+                pid_alive=pid_alive,
+                stale_reason=stale_reason,
             )
 
         return self._service_status_from_state(
-            state, running=True, stale=False, reachable=True,
+            state,
+            running=True,
+            stale=False,
+            reachable=True,
+            pid_alive=True,
+            stale_reason=None,
         )
 
     def ensure_running(
@@ -345,7 +403,11 @@ class ServiceManager:
         port: int,
         status_indicator: bool,
     ) -> ServiceStatus:
-        current = self.status()
+        current = self.status(
+            cleanup_stale=True,
+            auto_recover_unreachable=True,
+            status_indicator=status_indicator,
+        )
         if current.running and current.host == host and current.port == port and not status_indicator:
             return current
         return self.start_background(host=host, port=port, status_indicator=status_indicator)

@@ -143,7 +143,12 @@ def build_parser(*, formatter_class: type | None = None) -> argparse.ArgumentPar
     )
 
     subparsers.add_parser("stop", parents=[common], help="Stop service")
-    subparsers.add_parser("status", parents=[common], help="Show service status")
+    status_parser = subparsers.add_parser("status", parents=[common], help="Show service status")
+    status_parser.add_argument(
+        "--diagnose",
+        action="store_true",
+        help="Read-only health snapshot (no cleanup/restart side effects)",
+    )
 
     trigger_parser = subparsers.add_parser(
         "trigger",
@@ -348,9 +353,13 @@ def _service_stop() -> None:
         console.print_success("Service stopped")
 
 
-def _service_status() -> None:
+def _service_status(*, diagnose: bool = False) -> None:
     manager = ServiceManager()
-    status = manager.status()
+    status = manager.status(
+        cleanup_stale=not diagnose,
+        auto_recover_unreachable=not diagnose,
+        status_indicator=True,
+    )
     console = get_console()
 
     if status.running:
@@ -380,7 +389,7 @@ def _service_status() -> None:
                 _runtime_status_snapshot(
                     host,
                     port,
-                    kickoff_onboarding=True,
+                    kickoff_onboarding=not diagnose,
                     timeout_seconds=STATUS_SNAPSHOT_TIMEOUT_SECONDS,
                 )
             )
@@ -406,6 +415,29 @@ def _service_status() -> None:
         return
 
     if status.stale:
+        if diagnose:
+            stale_reason = status.stale_reason or "unknown"
+            pid_alive_text = str(bool(status.pid_alive)).lower()
+            reachable_text = str(bool(status.reachable)).lower()
+            if console.is_rich:
+                console.print_warning(
+                    "Stale service state detected (diagnose mode, no cleanup): "
+                    f"pid={status.pid} host={status.host} port={status.port} reason={stale_reason}"
+                )
+                console.print(
+                    f"  pid_alive={pid_alive_text} reachable={reachable_text} "
+                    "cleanup=false auto_recover=false"
+                )
+            else:
+                print(
+                    f"stale (diagnose) pid={status.pid} host={status.host} "
+                    f"port={status.port} reason={stale_reason}"
+                )
+                print(
+                    f"diagnose pid_alive={pid_alive_text} reachable={reachable_text} "
+                    "cleanup=false auto_recover=false"
+                )
+            return
         console.print_stale_status(pid=status.pid, host=status.host, port=status.port)
         return
 
@@ -625,6 +657,34 @@ def _print_first_run_guidance(kickoff_sent: bool) -> None:
     print("  murmur status")
 
 
+def _print_hotkey_diagnostics(config: dict[str, Any]) -> None:
+    diagnostics = config.get("hotkey_diagnostics")
+    if not isinstance(diagnostics, dict):
+        return
+
+    backend = str(diagnostics.get("backend", "unknown"))
+    started = bool(diagnostics.get("started", False))
+    blocked = bool(diagnostics.get("blocked", False))
+    thread_alive = bool(diagnostics.get("thread_alive", False))
+    def _as_int(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    tap_disable_count = _as_int(diagnostics.get("tap_disable_count", 0))
+    tap_reenable_count = _as_int(diagnostics.get("tap_reenable_count", 0))
+    press_count = _as_int(diagnostics.get("press_count", 0))
+    release_count = _as_int(diagnostics.get("release_count", 0))
+
+    print(
+        "hotkey "
+        f"backend={backend} started={str(started).lower()} blocked={str(blocked).lower()} "
+        f"thread_alive={str(thread_alive).lower()} press_count={press_count} release_count={release_count} "
+        f"tap_disables={tap_disable_count} tap_reenables={tap_reenable_count}"
+    )
+
+
 def _print_runtime_status_snapshot(snapshot: dict[str, Any]) -> None:
     status = snapshot.get("status")
     message = snapshot.get("message")
@@ -638,6 +698,8 @@ def _print_runtime_status_snapshot(snapshot: dict[str, Any]) -> None:
     if not isinstance(config, dict):
         print("runtime_detail=unavailable")
         return
+
+    _print_hotkey_diagnostics(config)
 
     first_run = _first_run_pending(config)
     startup_dict, phase, blocker_list, close_ready = _parse_startup_detail(config)
@@ -972,7 +1034,7 @@ def main() -> None:
         return
 
     if args.command == "status":
-        _service_status()
+        _service_status(diagnose=bool(getattr(args, "diagnose", False)))
         return
 
     if args.command == "bridge":
