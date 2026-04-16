@@ -26,7 +26,7 @@ dependencies = [
   "faster-whisper>=1.0.0",
   "huggingface-hub>=0.24.0",
   "numpy>=1.24.0",
-  "pyobjc-framework-Quartz>=9.0; sys_platform == 'darwin'",
+  "pyobjc-framework-Quartz>=12.1; sys_platform == 'darwin'",
   "python-xlib>=0.33; sys_platform == 'linux'",
   "psutil>=5.9.0; sys_platform == 'win32'",
   "pywin32>=306; sys_platform == 'win32'",
