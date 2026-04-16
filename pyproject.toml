@@ -48,7 +48,7 @@ dev = [
   "mypy>=1.0",
   "pytest>=7.0",
   "pytest-cov>=5.0",
-  "ruff>=0.6",
+  "ruff>=0.15.10",
   "termtosvg>=1.1.0",
   "pyte>=0.8",
 ]
