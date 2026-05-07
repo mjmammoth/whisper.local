@@ -8,7 +8,7 @@
     "build:release": "bun run scripts/build-release.ts"
   },
   "dependencies": {
-    "@opentui/core": "^0.1.79",
+    "@opentui/core": "^0.2.3",
     "@opentui/solid": "^0.1.79",
     "opentui-spinner": "^0.0.6",
     "solid-js": "^1.8.0"
